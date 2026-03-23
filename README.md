@@ -31,3 +31,10 @@ Mở trực tiếp `index.html` hoặc dùng extension Live Server.
 
 - PWA hoạt động tốt hơn khi chạy trên domain GitHub Pages hoặc domain HTTPS.
 - localStorage chỉ lưu trận hiện tại trên đúng thiết bị và đúng trình duyệt đó.
+
+## Plan:
+Bổ sung 1 số điều chỉnh:
+- Thêm cho tôi ràng buộc mỗi ván chỉ chặt tối đa 2 heo đen và 2 heo đỏ thôi nhé, tránh nhập thừa. 
+- Trong bước 3 lúc setup trận thì chỉ cần nhập điểm thắng tự tính ra điểm thua readonly field điểm thua.
+- Sửa lỗi: trong 2 trường hợp tới trắng và tới nhất 3 bích không thấy trừ điểm tất cả các nhà kia dẫn đến kết quả sai.
+- Trong trường hợp tới trắng thì không cần quan tâm thứ hạng nhất nhì ba. Chỉ tính điểm ăn trắng là được.
