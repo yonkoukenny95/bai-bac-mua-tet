@@ -254,6 +254,22 @@ body {
 }
 .case-extra { display: none; margin-top: 10px; }
 .case-item.active .case-extra { display: block; }
+
+.victim-matrix-grid {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+.victim-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+.victim-name {
+  font-size: .9rem;
+  color: var(--muted);
+}
 .alert-inline {
   border-radius: 16px;
   padding: 12px 14px;

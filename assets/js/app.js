@@ -2,6 +2,16 @@ import { GAME_OPTIONS, RANK_LABELS, SCORE_MODES, STEPS } from "./constants.js";
 import { applyRound, calculateRound, validateRound } from "./engine/score-engine.js";
 import { computeRanks, escapeHtml, formatSignedNumber, getRankOptions, nowIso, qs, qsa, toNumber, trimText, uid } from "./helpers.js";
 import { TIEN_LEN_GAME, createDefaultRules, changePlayerCount } from "./games/tienlen/config.js";
+import {
+  applySpecialCasesRulesFromDom,
+  buildRoundSpecialCasesDraftForPlayer,
+  calculateTempScoreForPlayer,
+  getEnabledSpecialCases,
+  recalcPerPlayerCaseScores,
+  renderSpecialCaseRuleTemplate,
+  renderSpecialCasesForPlayer,
+  renderSpecialCasesSummaryForRoundEntry,
+} from "./games/tienlen/ui.js";
 import { clearState, loadState, saveState } from "./storage.js";
 import { createInitialState, createPlayers } from "./state.js";
 
@@ -82,63 +92,6 @@ function renderGameStep() {
   });
 }
 
-function specialCaseRuleTemplate(item, rule) {
-  return `
-    <div class="rule-item">
-      <div class="rule-item-header">
-        <div>
-          <div class="rule-item-title">${item.label}</div>  
-        </div>
-        <div class="form-check form-switch m-0">
-          <input class="form-check-input" type="checkbox" data-case-enabled="${item.code}" ${rule.enabled ? "checked" : ""}>
-        </div>
-      </div>
-      <div class="row g-2 align-items-end">
-        <div class="col-6 ${item.type === "perplayer" ? "" : "d-none"}">
-          <label class="compact-label">Thắng 1 người</label>
-          <input
-            type="number"
-            class="form-control"
-            data-case-per-player="${item.code}"
-            value="${rule.score / Math.max(state.setup.playerCount - 1, 1)}"
-          >
-        </div>
-        <div class="col-6">
-          <label class="compact-label">Điểm áp dụng</label>
-          <input type="number" class="form-control" 
-            data-case-score="${item.code}" 
-            value="${rule.score}"
-            ${item.type === "perplayer" ? "readonly" : ""}
-          >
-        </div>
-        <div class="col-6 ${item.type === "multiplied" ? "" : "d-none"}">
-          <label class="compact-label">Kiểu nhân</label>
-          <select class="form-select" data-case-multiplier="${item.code}">
-            <option value="count" ${rule.multiplierMode === "count" ? "selected" : ""}>x số lần</option>
-            <option value="double-count" ${rule.multiplierMode === "double-count" ? "selected" : ""}>x2 x số lần</option>
-          </select>
-        </div>
-      </div>
-    </div>
-  `;
-}
-
-function recalcPerPlayerCaseScores() {
-  const loserCount = Math.max((state.setup.playerCount || 2) - 1, 1);
-
-  TIEN_LEN_GAME.specialCases
-    .filter((item) => item.type === "perplayer")
-    .forEach((item) => {
-      const perPlayerInput = qs(`[data-case-per-player="${item.code}"]`);
-      const totalScoreInput = qs(`[data-case-score="${item.code}"]`);
-
-      if (!perPlayerInput || !totalScoreInput) return;
-
-      const perPlayerScore = toNumber(perPlayerInput.value, 0);
-      totalScoreInput.value = perPlayerScore * loserCount;
-    });
-}
-
 function renderRulesStep() {
   const ranking = state.rules.rankingScores;
   const rankOptions = getRankOptions(state.setup.playerCount);
@@ -197,7 +150,7 @@ function renderRulesStep() {
       <div class="section-title mb-2">Trường hợp đặc biệt</div>
       <p class="section-subtitle">Bạn có thể bật hoặc tắt từng trường hợp, gán điểm riêng, và chọn kiểu nhân cho case chặt chồng.</p>
       <div class="rule-grid mb-4">
-        ${TIEN_LEN_GAME.specialCases.map((item) => specialCaseRuleTemplate(item, state.rules.specialCases[item.code])).join("")}
+        ${TIEN_LEN_GAME.specialCases.map((item) => renderSpecialCaseRuleTemplate(item, state.rules.specialCases[item.code], state.setup.playerCount)).join("")}
       </div>
 
       <div class="action-row">
@@ -216,10 +169,10 @@ function renderRulesStep() {
       updateState((prev) => ({ ...prev, scoreMode: button.dataset.scoreMode }));
     });
   });
-  recalcPerPlayerCaseScores();
+  recalcPerPlayerCaseScores({ playerCount: state.setup.playerCount });
   qsa("[data-case-per-player]").forEach((input) => {
     input.addEventListener("input", () => {
-      recalcPerPlayerCaseScores();
+      recalcPerPlayerCaseScores({ playerCount: state.setup.playerCount });
     });
   });
   qs("#backToPlayers").addEventListener("click", () => updateState((prev) => ({ ...prev, currentStep: 2 })));
@@ -235,13 +188,7 @@ function renderRulesStep() {
     nextRules.rankingScores.third = qs("#rankThird") ? toNumber(qs("#rankThird").value, 0) : 0;
     nextRules.rankingScores.last = toNumber(qs("#rankLast").value, 0);
 
-    TIEN_LEN_GAME.specialCases.forEach((item) => {
-      nextRules.specialCases[item.code].enabled = qs(`[data-case-enabled="${item.code}"]`).checked;
-      nextRules.specialCases[item.code].score = toNumber(qs(`[data-case-score="${item.code}"]`).value, 0);
-      if (item.type === "multiplied") {
-        nextRules.specialCases[item.code].multiplierMode = qs(`[data-case-multiplier="${item.code}"]`).value;
-      }
-    });
+    applySpecialCasesRulesFromDom({ rules: nextRules });
 
     updateState((prev) => ({
       ...prev,
@@ -458,21 +405,10 @@ function renderRecentRounds() {
                       .map((entry) => {
                         const player = state.players.find((item) => item.id === entry.playerId);
 
-                        const specialCases = entry.specialCases.length
-                          ? `
-                            ${entry.specialCases
-                              .map((item) => {
-                                const gameCase = TIEN_LEN_GAME.specialCases.find((x) => x.code === item.code);
-
-                                const label = gameCase?.label || item.code;
-                                const score = state.rules.specialCases[item.code]?.score || 0;
-                                const count = item.count > 1 ? ` x${item.count}` : "";
-
-                                return `<p class="small mb-0 text-danger">${escapeHtml(label)} (${score}) ${count}</p>`;
-                              })
-                              .join("")}
-                        `
-                          : `<span class="case-empty"></span>`;
+                        const specialCases = renderSpecialCasesSummaryForRoundEntry({
+                          entrySpecialCases: entry.specialCases,
+                          state: state,
+                        });
 
                         return `
                           <tr>
@@ -594,7 +530,8 @@ function renderScoreboardStep() {
 
   qs("#editSetupBtn").addEventListener("click", () => updateState((prev) => ({ ...prev, currentStep: 3 })));
   qs("#resetMatchBtn").addEventListener("click", openResetConfirm);
-  qs("#addRoundBtn").addEventListener("click", openRoundDialog);
+  // Không truyền event vào tham số `roundId` (nếu truyền trực tiếp sẽ nhận PointerEvent).
+  qs("#addRoundBtn").addEventListener("click", () => openRoundDialog(null));
   qs("#showSummaryBtn").addEventListener("click", () => openSummaryDialog(false));
   bindHistoryPagingEvents(qs(".history-pagination"));
   qsa('[data-action="edit-round"]', contentSection).forEach((button) => {
@@ -610,7 +547,7 @@ function renderScoreboardStep() {
 
 function buildRoundDialog(editingRound = null) {
   const rankOptions = getRankOptions(state.setup.playerCount);
-  const caseOptions = TIEN_LEN_GAME.specialCases.filter((item) => state.rules.specialCases[item.code]?.enabled);
+  const caseOptions = getEnabledSpecialCases(state.rules);
   const dialogTitle = editingRound ? `Sửa ván ${editingRound.roundNumber}` : `Ghi điểm ván ${state.rounds.length + 1}`;
 
   const dialogSubtitle = editingRound
@@ -618,6 +555,56 @@ function buildRoundDialog(editingRound = null) {
     : "Chọn thứ hạng và thêm sự kiện đặc biệt nếu có. Điểm tạm tính sẽ tự cập nhật.";
 
   const entryMap = new Map((editingRound?.entries || []).map((entry) => [entry.playerId, entry]));
+
+  // Khi edit ván cũ (chưa lưu `victimBreakdown`), ta tạo fallback breakdown
+  // để giữ tổng điểm đúng theo victim/attacker đã lưu trong round.
+  const victimBreakdownFallbacksByAttackerCode = (() => {
+    const PAIRS = [
+      { attackerCode: "chatHeoDen", victimCode: "thuiHeoDen" },
+      { attackerCode: "chatHeoDo", victimCode: "thuiHeoDo" },
+      { attackerCode: "chatChong", victimCode: "biChatChong" },
+    ];
+
+    const getCount = (playerId, code) => {
+      const entry = entryMap.get(playerId);
+      const sc = entry?.specialCases?.find((x) => x.code === code);
+      return Number(sc?.count || 0);
+    };
+
+    const result = {};
+
+    for (const pair of PAIRS) {
+      const attackers = state.players.map((p) => ({ id: p.id, count: getCount(p.id, pair.attackerCode) })).filter((x) => x.count > 0);
+      const victims = state.players.map((p) => ({ id: p.id, count: getCount(p.id, pair.victimCode) })).filter((x) => x.count > 0);
+
+      const sumA = attackers.reduce((s, x) => s + x.count, 0);
+      const sumV = victims.reduce((s, x) => s + x.count, 0);
+      if (sumA <= 0 || sumV <= 0) continue;
+
+      const N = Math.min(sumA, sumV);
+      const attackerEvents = [];
+      const victimEvents = [];
+
+      attackers.forEach((a) => {
+        for (let i = 0; i < a.count && attackerEvents.length < N; i++) attackerEvents.push(a.id);
+      });
+      victims.forEach((v) => {
+        for (let i = 0; i < v.count && victimEvents.length < N; i++) victimEvents.push(v.id);
+      });
+
+      const breakdownByAttacker = {};
+      for (let i = 0; i < N; i++) {
+        const attackerId = attackerEvents[i];
+        const victimId = victimEvents[i];
+        breakdownByAttacker[attackerId] ||= {};
+        breakdownByAttacker[attackerId][victimId] = (breakdownByAttacker[attackerId][victimId] || 0) + 1;
+      }
+
+      result[pair.attackerCode] = breakdownByAttacker;
+    }
+
+    return result;
+  })();
   return `
     <div class="dialog-header">
       <div>
@@ -683,53 +670,13 @@ function buildRoundDialog(editingRound = null) {
               <div class="special-cases-wrap collapse ${hasSpecialCases ? "show" : ""} mt-3" data-special-wrap="${player.id}" id="specialWrap_${player.id}">
                 <div class="compact-label mb-2">Case đặc biệt</div>
                 <div class="case-list">
-                  ${
-                    caseOptions.length
-                      ? caseOptions
-                          .map((item) => {
-                            const matchedCase = selectedCases.find((x) => x.code === item.code);
-                            const isChecked = !!matchedCase;
-                            const appliedCount = matchedCase?.count || 1;
-                            return `
-                                <div class="case-item" data-case-row="${player.id}_${item.code}">
-                                  <div class="case-head">
-                                    <div>
-                                      <div class="fw-semibold">${item.label}</div>
-                                      <div class="mini-note">${item.note}</div>
-                          </div>
-                          <div class="form-check form-switch m-0">
-                            <input
-                              class="form-check-input"
-                              type="checkbox"
-                              data-case-check="${player.id}"
-                              data-case-code="${item.code}"
-                              ${isChecked ? "checked" : ""}
-                            >
-                          </div>
-                        </div>
-                        ${
-                          item.type === "multiplied"
-                            ? `
-                          <div class="case-extra mt-2">
-                            <label class="compact-label">Số lần áp dụng</label>
-                            <input
-                              type="number"
-                              class="form-control"
-                              min="1"
-                              value="${appliedCount}"
-                              data-case-count="${player.id}"
-                              data-case-code="${item.code}"
-                            >
-                          </div>
-                        `
-                            : ""
-                        }
-                      </div>
-                    `;
-                          })
-                          .join("")
-                      : '<div class="empty-state">Không có case đặc biệt nào đang bật trong setup.</div>'
-                  }
+                  ${renderSpecialCasesForPlayer({
+                    playerId: player.id,
+                    players: state.players,
+                    caseOptions,
+                    selectedCases,
+                    victimBreakdownFallbacksByAttackerCode,
+                  })}
                 </div>
               </div>
               <div class="row g-3 mb-2">
@@ -777,53 +724,24 @@ function bindSpecialCaseToggles(container = document) {
           checkbox.checked = false;
         });
 
-        wrap.querySelectorAll(`[data-case-count="${playerId}"]`).forEach((input) => {
-          input.value = 1;
+        // Tắt các bảng nạn nhân tương ứng (chỉ áp dụng cho các case "chặt có nạn nhân").
+        wrap.querySelectorAll(`[data-case-check="${playerId}"]`).forEach((checkbox) => {
+          const key = `${playerId}_${checkbox.dataset.caseCode}`;
+          const victimsWrap = wrap.querySelector(`[data-case-victims-wrap="${key}"]`);
+          if (!victimsWrap) return;
+          victimsWrap.classList.add("d-none");
         });
 
-        calculateTempScore(playerId, container);
+        wrap.querySelectorAll(`[data-case-count="${playerId}"]`).forEach((input) => {
+          const min = toNumber(input.dataset.caseMin, 1);
+          input.value = String(min);
+        });
+
+        // Matrix phía nạn nhân có thể bị ảnh hưởng, nên tính lại cho toàn bộ người chơi.
+        state.players.forEach((p) => calculateTempScoreForPlayer({ playerId: p.id, container, state }));
       }
     });
   });
-}
-
-function calculateTempScore(playerId, container) {
-  let score = 0;
-
-  // điểm theo thứ hạng
-  const rankInput = container.querySelector(`[data-rank-input="${playerId}"]`);
-  const rank = rankInput?.value;
-
-  if (rank) {
-    const rankScore = state.rules.rankingScores?.[rank] || 0;
-    score += Number(rankScore);
-  }
-
-  // case đặc biệt
-  const checks = container.querySelectorAll(`[data-case-check="${playerId}"]:checked`);
-
-  checks.forEach((checkbox) => {
-    const code = checkbox.dataset.caseCode;
-    const rule = state.rules.specialCases?.[code];
-
-    if (!rule) return;
-
-    if (rule.type === "fixed") {
-      score += Number(rule.score || 0);
-    }
-
-    if (rule.type === "multiplied") {
-      const countInput = container.querySelector(`[data-case-count="${playerId}"][data-case-code="${code}"]`);
-
-      const count = Number(countInput?.value || 1);
-      score += Number(rule.score || 0) * count;
-    }
-  });
-
-  const scoreInput = container.querySelector(`[data-temp-score="${playerId}"]`);
-  if (scoreInput) {
-    scoreInput.value = formatSignedNumber(score);
-  }
 }
 
 function getRoundById(roundId) {
@@ -833,13 +751,13 @@ function getRoundById(roundId) {
 function openRoundDialog(roundId = null) {
   const editingRound = roundId ? getRoundById(roundId) : null;
 
-  roundDialog.dataset.editingRoundId = roundId || "";
+  roundDialog.dataset.editingRoundId = roundId ? roundId : "0";
   roundDialog.innerHTML = buildRoundDialog(editingRound);
 
   bindSpecialCaseToggles(roundDialog);
 
   state.players.forEach((p) => {
-    calculateTempScore(p.id, roundDialog);
+    calculateTempScoreForPlayer({ playerId: p.id, container: roundDialog, state });
   });
 
   roundDialog.showModal();
@@ -853,7 +771,7 @@ function openRoundDialog(roundId = null) {
       qsa(`[data-rank-btn="${playerId}"]`, roundDialog).forEach((item) => item.classList.remove("active"));
       button.classList.add("active");
       qs(`[data-rank-input="${playerId}"]`, roundDialog).value = button.dataset.rankValue;
-      calculateTempScore(playerId, roundDialog);
+      calculateTempScoreForPlayer({ playerId, container: roundDialog, state });
     });
   });
 
@@ -862,17 +780,38 @@ function openRoundDialog(roundId = null) {
       const playerId = input.dataset.caseCheck;
       const key = `${playerId}_${input.dataset.caseCode}`;
       qs(`[data-case-row="${key}"]`, roundDialog)?.classList.toggle("active", input.checked);
-      calculateTempScore(playerId, roundDialog);
+
+      // Nếu là case "chặt có nạn nhân" (matrix), bật/tắt và reset count khi tắt.
+      const victimsWrap = qs(`[data-case-victims-wrap="${key}"]`, roundDialog);
+      if (victimsWrap) {
+        victimsWrap.classList.toggle("d-none", !input.checked);
+        if (!input.checked) {
+          victimsWrap.querySelectorAll(`[data-case-victim]`).forEach((x) => {
+            const min = toNumber(x.dataset.caseMin, 0);
+            x.value = String(min);
+          });
+        }
+
+        // Khi đổi trạng thái attacker-case "chặt", điểm tạm của các nạn nhân cũng thay đổi.
+        state.players.forEach((p) => calculateTempScoreForPlayer({ playerId: p.id, container: roundDialog, state }));
+        return;
+      }
+
+      calculateTempScoreForPlayer({ playerId, container: roundDialog, state });
     });
   });
 
   qsa("[data-case-count]", roundDialog).forEach((input) => {
     input.addEventListener("input", () => {
       const playerId = input.dataset.caseCount;
-      if (!input.value || Number(input.value) < 1) {
-        input.value = 1;
+      const min = toNumber(input.dataset.caseMin, 1);
+      if (!input.value || Number(input.value) < min) input.value = String(min);
+      // Nếu đây là matrix nạn nhân, điểm tạm của nhiều người thay đổi.
+      if (input.dataset.caseVictim) {
+        state.players.forEach((p) => calculateTempScoreForPlayer({ playerId: p.id, container: roundDialog, state }));
+        return;
       }
-      calculateTempScore(playerId, roundDialog);
+      calculateTempScoreForPlayer({ playerId, container: roundDialog, state });
     });
   });
 
@@ -902,6 +841,8 @@ function rebuildMatchFromRounds(baseState, rounds) {
           code: item.code,
           selected: true,
           count: item.count || 1,
+          side: item.side,
+          victimBreakdown: item.victimBreakdown,
         })),
       })),
     });
@@ -919,19 +860,16 @@ function rebuildMatchFromRounds(baseState, rounds) {
 function handleRoundSubmit(event) {
   event.preventDefault();
 
-  const editingRoundId = roundDialog.dataset.editingRoundId || null;
+  const editingRoundId = roundDialog.dataset.editingRoundId !== "0" ? roundDialog.dataset.editingRoundId : null;
 
   const entries = state.players.map((player) => {
     const rank = qs(`[data-rank-input="${player.id}"]`, roundDialog).value;
 
-    const specialCases = TIEN_LEN_GAME.specialCases
-      .filter((item) => state.rules.specialCases[item.code]?.enabled)
-      .filter((item) => qs(`[data-case-check="${player.id}"][data-case-code="${item.code}"]`, roundDialog)?.checked)
-      .map((item) => ({
-        code: item.code,
-        selected: true,
-        count: toNumber(qs(`[data-case-count="${player.id}"][data-case-code="${item.code}"]`, roundDialog)?.value, 1),
-      }));
+    const specialCases = buildRoundSpecialCasesDraftForPlayer({
+      playerId: player.id,
+      container: roundDialog,
+      rules: state.rules,
+    });
 
     return {
       playerId: player.id,
