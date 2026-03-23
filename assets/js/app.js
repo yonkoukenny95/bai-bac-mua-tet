@@ -594,7 +594,7 @@ function renderScoreboardStep() {
 
   qs("#editSetupBtn").addEventListener("click", () => updateState((prev) => ({ ...prev, currentStep: 3 })));
   qs("#resetMatchBtn").addEventListener("click", openResetConfirm);
-  qs("#addRoundBtn").addEventListener("click", openRoundDialog);
+  qs("#addRoundBtn").addEventListener("click", () => openRoundDialog(null));
   qs("#showSummaryBtn").addEventListener("click", () => openSummaryDialog(false));
   bindHistoryPagingEvents(qs(".history-pagination"));
   qsa('[data-action="edit-round"]', contentSection).forEach((button) => {
